@@ -1,0 +1,38 @@
+median_blur_ksize: 3
+protect_gradient_percentile: 88
+protect_dilation_px: 15
+background_sigma_px: 80
+clahe_clip_limit: 1.5
+clahe_tile_grid_size: [16, 16]
+allow_clahe_for_protect_mask: false
+
+candidate_method: hough
+hough_dp: 1.2
+hough_min_dist_px: 18
+hough_param1: 85
+hough_param2: 40
+min_radius_px: 5
+max_radius_px: 32
+candidate_nms_center_fraction: 0.65
+candidate_nms_radius_fraction: 0.45
+log_num_sigma: 8
+log_threshold_percentile: 99.2
+
+contour_n_angles: 72
+radial_search_min_scale: 0.60
+radial_search_max_scale: 1.22
+radial_search_extra_px: 3
+radial_peak_nearmax_fraction: 0.84
+radial_smoothing_sigma: 1.0
+max_overlap_skip_fraction: 0.42
+max_overlap_qc_fraction: 0.30
+min_valid_radial_fraction: 0.60
+
+exclude_edge_touching: true
+min_area_px2: 20
+max_area_px2: 3200
+pixel_size_um: null
+
+save_intermediate: true
+run_sensitivity: false
+seed: 0
