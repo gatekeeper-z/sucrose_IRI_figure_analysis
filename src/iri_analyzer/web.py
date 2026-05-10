@@ -4,6 +4,7 @@ import csv
 from datetime import datetime
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import shutil
 import uuid
@@ -403,10 +404,11 @@ def main() -> None:
 
     url = "http://127.0.0.1:8000"
     print(f"IRI Analyzer Web UI: {url}")
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+    if os.environ.get("IRI_ANALYZER_NO_AUTO_OPEN") != "1":
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
     uvicorn.run("iri_analyzer.web:app", host="127.0.0.1", port=8000, reload=False)
 
 

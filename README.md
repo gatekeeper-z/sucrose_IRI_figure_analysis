@@ -1,30 +1,216 @@
-# IRI Image Analyzer
+# IRI Analyzer 使用指南
 
-Python tool for estimating ice-crystal actual contour area from sucrose IRI microscopy images.
+IRI Analyzer 是一个本地运行的蔗糖法 IRI 显微图像冰晶面积分析工具。它提供网页界面，适合不写代码地批量导入图片、调整关键参数、查看完整中间图、导出 CSV/JSON/PNG/ZIP 结果。
 
-## Important Notes
+本项目的核心原则：
 
-- CLAHE is not applied before background estimation by default.
-- The default order is `gray -> protect mask -> background estimate from raw gray -> flat-field correction -> CLAHE -> segmentation`.
-- HoughCircles and LoG are localization tools only; they do not define crystal area.
-- `actual_area_px2` is measured from each final instance mask.
-- `accepted_total_actual_area_px2` is the default summary value for downstream scientific analysis.
-- `circle_area_px2` is only a reference field and is not used for total area.
-- Without `pixel_size_um`, the tool reports area only in `px²`.
-- The default round workflow is intended for mostly round, separated ice crystals with reasonably sharp boundaries.
-- A gated square-like strategy can add contour candidates for square, rectangular, or polygonal crystals.
-- Slight adhesion can be split by a conservative distance-transform branch; severe adhesion still requires manual QC or a learned segmentation route such as Cellpose.
-- Inspect representative `10_final_overlay.png` and `11_label_overlay.png` files for every batch.
+- Hough/LoG 只用于寻找候选冰晶位置，不作为面积测量。
+- 最终面积来自每个冰晶的实际实例 mask，即 `actual_area_px2`。
+- 默认科学汇总优先使用 `accepted_total_actual_area_px2`。
+- 没有填写像素尺寸时，只输出 `px²`；填写 `um/px` 后才输出 `um²`。
+- 自动结果是图像分割估计，不应直接当作最终科学结论。每批数据都建议检查 `10_final_overlay.png` 和 `11_label_overlay.png`。
 
-Do not treat automatic output as a final scientific conclusion. Reported areas are segmentation-derived estimates and must be checked against overlays.
+## 第一次使用：无需手敲命令
 
-## Installation
+在 Windows 上，普通使用者只需要双击根目录下的两个脚本。
 
-```bash
-pip install -e .
+### 第一步：双击安装环境
+
+双击：
+
+```text
+01_setup_environment.cmd
 ```
 
-## CLI Usage
+这个脚本会自动检查并准备项目运行环境：
+
+- 检查 Python 环境；如果没有，会优先尝试用 Windows `winget` 自动安装 Python。
+- 检查 Node.js/npm；如果没有，会优先尝试用 `winget` 自动安装 Node.js LTS。
+- 创建本项目专用 Python 虚拟环境 `.venv`。
+- 安装 Python 图像分析依赖。
+- 安装前端依赖。
+- 构建本地网页前端。
+- 运行一次快速测试，确认项目可用。
+
+如果你的系统没有 `winget`，脚本会自动打开 Python 或 Node.js 的官方下载页面。安装完成后，再次双击 `01_setup_environment.cmd` 即可继续。
+
+安装成功后，窗口会显示 `Setup complete`。
+
+### 第二步：双击启动网页
+
+双击：
+
+```text
+02_start_web_ui.cmd
+```
+
+这个脚本会：
+
+- 检查本地环境是否已经安装好。
+- 启动 IRI Analyzer 本地网页服务。
+- 自动在默认浏览器打开：
+
+```text
+http://127.0.0.1:8000
+```
+
+使用网页时，请保持启动脚本打开的黑色窗口不要关闭。关闭窗口或按 `Ctrl+C` 会停止服务。
+
+## 网页怎么用
+
+### 1. 选择图片
+
+进入网页后，在“分析”页点击“选择图片”，可以一次选择一张或多张显微图。
+
+支持格式：
+
+```text
+bmp, png, jpg, jpeg, tif, tiff
+```
+
+也可以把图片拖拽到上传区域。
+
+### 2. 选择预设
+
+右侧有三个预设：
+
+- `默认`：通用参数，适合先试跑。
+- `0.1 PVA`：偏向圆形、分离冰晶。
+- `0.2 PVA`：增强方形/短棒状冰晶识别，并允许保守的轻微粘连分裂。
+
+如果先选了某个预设，又手动调整了下面的参数，最终运行会使用：
+
+```text
+所选预设作为基础 + 手动调整参数覆盖同名项
+```
+
+此时预设按钮会取消高亮，避免误以为仍是完全原始预设。
+
+### 3. 常用参数
+
+- `像素尺寸 um/px`：显微标定值。例如每像素 `0.5 um`，就填写 `0.5`。不确定时留空，不要填写单位。
+- `排除贴边对象`：开启后，贴到图像边缘的对象不进入 accepted 科学统计。
+- `方形策略`：自动、开启、关闭。用于补充识别方形、矩形、多边形冰晶。
+- `粘连分裂`：自动、开启、关闭。用于保守处理轻微粘连对象。
+
+高级参数可以展开，用于调整背景、候选、轮廓、面积过滤、方形识别和粘连分裂阈值。参数调整会保留在当前页面状态中，切换到历史或结果页再回来不会丢失；刷新浏览器页面才会恢复默认。
+
+### 4. 开始分析
+
+点击“开始分析”。批量图片会依次处理，避免同时占满 CPU。
+
+处理完成后可以点击“查看结果”。
+
+### 5. 查看结果
+
+结果页会展示每张图片的：
+
+- 原图和灰度图
+- 背景估计与背景校正图
+- 候选定位图
+- accepted/rejected 候选图
+- 方形候选和方形轮廓图
+- 径向可靠点和轮廓恢复图
+- 粘连 parent 和 split 图
+- 实例 mask
+- final overlay
+- label overlay
+- 面积直方图
+- QC 报告
+
+历史页会按处理时间倒序显示已分析过的图片缩略图、图片名和处理时间。
+
+## 可以导出什么
+
+网页支持：
+
+- 下载单张中间图。
+- 下载单张图片的完整结果 ZIP。
+- 下载整批分析的完整 ZIP。
+- 下载 `crystals.csv`、`candidates_accepted.csv`、`candidates_rejected.csv`、`summary.json`、`qc_report.txt`。
+
+所有网页运行结果默认保存在：
+
+```text
+results/web_runs/
+```
+
+每张图会有独立输出文件夹。
+
+## 本项目能做什么
+
+IRI Analyzer 可以：
+
+- 对单张或批量 IRI 显微图进行分析。
+- 做不规则背景阴影校正。
+- 输出完整中间处理图片，便于人工检查。
+- 识别圆形或近圆形冰晶。
+- 在门控触发时补充识别方形、矩形、多边形冰晶。
+- 对轻微粘连对象做保守分裂。
+- 输出每个冰晶的实际 mask 面积。
+- 输出 accepted/raw 两套统计，避免 QC warning 对象直接混入主统计。
+- 生成 QC 报告，标记贴边、重叠、异常面积、弱边界等可疑对象。
+
+## 方法说明
+
+默认处理顺序为：
+
+```text
+gray -> candidate protect mask -> background estimate from raw gray -> flat-field correction -> CLAHE -> candidate detection -> contour/mask refinement -> measurement -> QC
+```
+
+默认不建议“先 CLAHE 再估背景”，因为 CLAHE 会增强阴影、噪声和冰晶边缘，使背景估计带入伪结构。
+
+圆形候选使用 Hough/LoG 定位，但面积不来自圆面积。圆形对象会通过可靠径向射线恢复实际轮廓。
+
+方形或多边形候选走 contour-mask refinement，不强行拟合成正方形或矩形。面积仍来自最终实例 mask 的像素数。
+
+粘连分裂只处理高置信的轻微粘连。严重团聚、严重模糊、边界缺失对象默认需要人工 QC，必要时应考虑 Cellpose 等学习型分割方法。
+
+## 重点检查哪些结果
+
+每批数据至少抽查：
+
+- `03_background_estimate.png`：应主要是大尺度阴影，不应明显包含冰晶边缘。
+- `04_flatfield_corrected.png`：背景应比原图更均匀。
+- `06b_candidate_accepted_overlay.png`：accepted 候选应覆盖主要冰晶。
+- `06c_candidate_rejected_overlay.png`：rejected 对象应主要是弱边界、噪声、贴边或可疑结构。
+- `07d_square_contour_refined_overlay.png`：方形冰晶轮廓应贴近真实边界。
+- `07g_cluster_split_overlay.png`：粘连拆分不应把纹理碎片误当冰晶。
+- `10_final_overlay.png`：最终轮廓应贴近实际外轮廓。
+- `11_label_overlay.png`：编号应能与 `crystals.csv` 对应。
+- `qc_report.txt`：需要人工判断 warning 对象是否保留。
+
+## 常见问题
+
+### 双击安装脚本后提示没有 Python 或 Node.js
+
+脚本会优先尝试用 `winget` 自动安装。如果无法自动安装，会打开官方下载页面。安装完成后，再次双击 `01_setup_environment.cmd`。
+
+### 双击启动后网页打不开
+
+确认：
+
+- 是否已经运行过 `01_setup_environment.cmd`。
+- 启动窗口是否仍然打开。
+- 浏览器访问的是 `http://127.0.0.1:8000`。
+- 如果 8000 端口被占用，先关闭旧的 IRI Analyzer 启动窗口，再重新双击启动脚本。
+
+### 点击“选择图片”没有反应
+
+请刷新网页后再试。当前版本使用显式按钮触发系统文件选择器，并支持拖拽图片到上传区域。
+
+### 面积单位为什么只有 px²
+
+因为没有填写 `像素尺寸 um/px`。例如显微标定为每像素 `0.5 um`，就在参数中填写 `0.5`。
+
+### 为什么最终面积不是圆面积
+
+圆形检测只用于定位。最终面积来自每个实例 mask 的像素面积，`circle_area_px2` 只作为参考字段。
+
+## 命令行用法（可选）
+
+普通用户不需要命令行。需要批处理或调试时，可以使用：
 
 ```bash
 python -m iri_analyzer.cli --input path/to/image.bmp --output output_dir --mode qc
@@ -32,201 +218,10 @@ python -m iri_analyzer.cli --input image_folder --output output_dir --mode batch
 python -m iri_analyzer.cli --input image.bmp --output output_dir --mode sensitivity
 ```
 
-Optional arguments:
-
-```bash
-python -m iri_analyzer.cli \
-  --input image.bmp \
-  --output output_dir \
-  --mode qc \
-  --config config.yaml \
-  --pixel-size-um 0.5 \
-  --exclude-edge-touching true \
-  --overwrite
-```
-
-Each image gets its own folder under the output directory. Existing non-empty per-image folders are not overwritten unless `--overwrite` is supplied.
-
-## Web UI
-
-Build the local frontend once:
-
-```bash
-cd web
-npm install
-npm run build
-cd ..
-```
-
-Start the no-code local app:
+也可以手动启动网页：
 
 ```bash
 python -m iri_analyzer.web
 ```
 
-Open:
-
-```text
-http://127.0.0.1:8000
-```
-
-The Web UI supports batch image upload, preset selection, key parameter controls, processing history, full intermediate-image review, single-file download, per-image ZIP download, and whole-run ZIP download. Web runs are written under:
-
-```text
-results/web_runs/
-```
-
-## Pipeline
-
-1. Read bmp/png/jpg/tif image and save `00_original.png`.
-2. Convert to grayscale and save `01_gray.png`.
-3. Save `02a_gradient_protect_mask_debug.png` as a debug view of the old gradient-style protect mask.
-4. Run a first-pass unmasked large-scale background correction, then detect coarse candidate crystals.
-5. Build `02b_candidate_protect_mask.png` from candidate circles only. This candidate protect mask is used for final background estimation and should normally stay below the configured cap.
-6. Estimate background from raw gray using masked Gaussian normalized convolution:
-
-```text
-valid = 1 - protect_mask
-background = GaussianBlur(gray * valid) / GaussianBlur(valid)
-```
-
-7. Apply flat-field correction:
-
-```text
-corrected = gray / background * median(background)
-```
-
-8. Save `03_background_estimate.png` and `04_flatfield_corrected.png`.
-9. Apply light CLAHE after background correction and save `05_bg_corrected_clahe.png`.
-10. Run square preflight. If enough square-like contour candidates are not already covered by round candidates, enable the square branch.
-11. Detect raw candidate crystals with HoughCircles by default, or LoG if configured. When square strategy is enabled, add square-like contour candidates.
-12. Validate candidates with shape-aware rules: round candidates use ring/radial metrics; square-like candidates use boundary strength, closure, solidity, extent, rectangularity, corner count, and local noise rejection.
-13. Refine accepted candidates. Round candidates use reliable radial rays; square-like candidates use contour-mask refinement instead of radial fitting.
-14. Optionally split high-confidence, slightly adhered parent masks with distance-transform seeds.
-15. Measure actual area from final instance masks and write raw plus accepted statistics.
-
-CLAHE is not recommended before background estimation because it can amplify shadows, noise, and ice-crystal edges, causing pseudo-structure to leak into the background model.
-
-## Output Files
-
-Per image folder:
-
-```text
-00_original.png
-01_gray.png
-02a_gradient_protect_mask_debug.png
-02b_candidate_protect_mask.png
-02c_square_preflight_overlay.png
-02_protect_mask.png
-03_background_estimate.png
-04_flatfield_corrected.png
-05_bg_corrected_clahe.png
-06a_candidate_raw_overlay.png
-06b_candidate_accepted_overlay.png
-06c_candidate_rejected_overlay.png
-06d_square_candidate_overlay.png
-06e_shape_accepted_overlay.png
-06f_shape_rejected_overlay.png
-06_candidate_localization_overlay.png
-07a_radial_reliable_points_overlay.png
-07b_radial_rejected_points_overlay.png
-07c_contour_refined_overlay.png
-07d_square_contour_refined_overlay.png
-07e_square_instance_masks.png
-07f_cluster_parent_overlay.png
-07g_cluster_split_overlay.png
-07_contour_points_overlay.png
-08_instance_masks.png
-09_final_mask.png
-10_final_overlay.png
-11_label_overlay.png
-12_area_histogram.png
-candidates_raw.csv
-candidates_accepted.csv
-candidates_rejected.csv
-candidates.csv
-square_preflight_candidates.csv
-crystals.csv
-clusters.csv
-summary.json
-config_used.yaml
-qc_report.txt
-```
-
-`candidates_raw.csv` contains every raw localization candidate. `candidates_accepted.csv` contains candidates that pass validation. `candidates_rejected.csv` records rejected candidates and reject reasons. The compatibility `candidates.csv` mirrors accepted candidates. Candidate radii are not area measurements.
-
-`crystals.csv` contains refined raw instances and an `accepted` field. The primary per-instance area is `actual_area_px2`, measured as the nonzero pixel count in the final instance mask. If `pixel_size_um` is provided, `actual_area_um2` and `equivalent_diameter_um` are also written.
-
-`summary.json` includes raw and accepted candidate counts, raw and accepted instance counts, raw and accepted total actual area, accepted equivalent diameter percentiles, accepted area fraction, QC warning count, the full config, and errors. Use `accepted_total_actual_area_px2` as the default scientific summary value.
-
-`sensitivity.csv` is written in sensitivity mode and contains:
-
-```text
-background_sigma_px,hough_param2,radial_search_scale_max,
-n_candidates,n_final_instances,total_actual_area_px2,
-median_actual_area_px2,n_qc_warning
-```
-
-## Key Parameters
-
-- `background_sigma_px`: scale of large-shadow background estimation. It should be larger than typical crystal diameter.
-- `background_mode`: default `two_pass_candidate_protect`.
-- `candidate_protect_radius_scale`, `candidate_protect_radius_extra_px`: protect radius used around preliminary candidates.
-- `target_protect_mask_fraction_max`: cap for candidate-protect mask fraction.
-- `protect_gradient_percentile`: percentile threshold for coarse edge protection.
-- `protect_dilation_px`: dilation radius for the protect mask.
-- `clahe_clip_limit`, `clahe_tile_grid_size`: light post-correction contrast enhancement.
-- `candidate_method`: `hough` or `log`.
-- `min_radius_px`, `max_radius_px`: candidate radius bounds.
-- `candidate_validation_enabled`: validate raw Hough/LoG candidates before contour refinement.
-- `min_edge_coverage_fraction`: minimum fraction of radial directions with a boundary peak.
-- `ring_gradient_noise_ratio_min`: minimum ring gradient strength relative to local noise.
-- `square_strategy_enabled`: `auto`, `true`, or `false`. `auto` enables square-like contour candidates only when preflight finds enough unmatched square-like objects.
-- `square_gate_min_candidates`, `square_gate_min_candidate_fraction`, `square_gate_min_area_fraction`: image-level gate thresholds for square strategy.
-- `square_gate_round_match_center_fraction`, `square_gate_round_match_iou`: suppress square preflight objects already covered by round candidates.
-- `square_candidate_*`: contour-shape filters for square-like candidate detection.
-- `square_refine_*`: local contour-mask refinement settings for square-like candidates.
-- `adhesion_strategy_enabled`, `adhesion_split_enabled`: `auto`, `true`, or `false` controls for slight-adhesion splitting.
-- `adhesion_*`: distance-transform seed and child-mask acceptance thresholds for cluster splitting.
-- `contour_n_angles`: number of radial search directions.
-- `radial_search_min_scale`, `radial_search_max_scale`, `radial_search_extra_px`: radial boundary search window.
-- `radial_peak_nearmax_fraction`: accepts a near-maximum gradient peak, lightly preferring the approximate candidate radius.
-- `max_overlap_skip_fraction`: skip an instance if too much of its mask overlaps earlier instances.
-- `max_overlap_qc_fraction`: flag a kept instance if trimmed overlap is large.
-- `exclude_edge_touching`: exclude edge-touching candidates from final statistics.
-- `exclude_qc_warning_from_accepted`: exclude QC-warning instances from accepted summary statistics.
-- `pixel_size_um`: micrometers per pixel. If omitted, physical units are not reported.
-
-## QC Guidance
-
-Review these files before trusting quantitative output:
-
-- `02b_candidate_protect_mask.png`: should protect crystal neighborhoods without covering most shadow edges.
-- `03_background_estimate.png`: should mainly show large-scale illumination/shadow.
-- `04_flatfield_corrected.png`: should reduce irregular background.
-- `06_candidate_localization_overlay.png`: candidates should cover visible crystals.
-- `10_final_overlay.png`: final contours should follow crystal boundaries.
-- `11_label_overlay.png`: labels should match `crystals.csv`.
-- `06c_candidate_rejected_overlay.png`: rejected candidates should mostly be weak-edge, noisy, edge-touching, or suspicious objects.
-- `02c_square_preflight_overlay.png`: confirms whether square-like candidates are present before enabling square strategy.
-- `07d_square_contour_refined_overlay.png`: square/rectangular contours should follow actual crystal edges.
-- `07g_cluster_split_overlay.png`: split children should correspond to real lightly adhered crystals, not texture fragments.
-- `qc_report.txt`: lists suspicious objects and skipped candidates.
-
-Automatic QC flags include abnormal `area_over_circle`, large radial radius range, large overlap trimming, edge touching, too-small area, too-large area, and failed/low-quality radial contours.
-
-## Validation
-
-Run:
-
-```bash
-pytest
-```
-
-For a supplied test image, run:
-
-```bash
-python -m iri_analyzer.cli --input path/to/test_image.bmp --output output_dir --mode qc --overwrite
-```
-
-Then inspect the background, flat-field corrected image, candidate overlay, final overlay, `crystals.csv`, `summary.json`, and `qc_report.txt`.
+推荐普通使用者优先使用两个双击脚本。
