@@ -22,6 +22,10 @@ def test_radial_refinement_returns_non_circular_mask_area():
         "radial_peak_nearmax_fraction": 0.78,
         "radial_smoothing_sigma": 1.0,
         "min_valid_radial_fraction": 0.60,
+        "min_reliable_ray_fraction": 0.55,
+        "prefer_outer_edge": True,
+        "max_neighbor_radius_jump_px": 4,
+        "max_neighbor_radius_jump_fraction": 0.18,
     }
     inst = refine_candidate(gradient, candidate, config)
     area = int(np.count_nonzero(inst.mask))
@@ -46,8 +50,33 @@ def test_overlap_skip_marks_second_instance():
         "radial_smoothing_sigma": 1.0,
         "max_overlap_skip_fraction": 0.55,
         "min_valid_radial_fraction": 0.60,
+        "min_reliable_ray_fraction": 0.55,
+        "prefer_outer_edge": True,
+        "max_neighbor_radius_jump_px": 4,
+        "max_neighbor_radius_jump_fraction": 0.18,
     }
     instances = refine_candidates(image.astype(np.uint8), candidates, config)
     assert len(instances) == 2
     assert instances[1].skipped
     assert instances[1].skip_reason == "overlap_skip"
+
+
+def test_blank_gradient_rejects_low_reliable_ray_fraction():
+    gradient = np.zeros((100, 100), dtype=np.float32)
+    candidate = Candidate(1, 50, 50, 20, False, "hough", 1.0)
+    config = {
+        "contour_n_angles": 72,
+        "radial_search_min_scale": 0.55,
+        "radial_search_max_scale": 1.45,
+        "radial_search_extra_px": 5,
+        "radial_peak_nearmax_fraction": 0.78,
+        "radial_smoothing_sigma": 1.0,
+        "min_reliable_ray_fraction": 0.55,
+        "prefer_outer_edge": True,
+        "max_neighbor_radius_jump_px": 4,
+        "max_neighbor_radius_jump_fraction": 0.18,
+    }
+    inst = refine_candidate(gradient, candidate, config)
+    assert inst.skipped
+    assert inst.skip_reason == "low_reliable_ray_fraction"
+    assert int(np.count_nonzero(inst.mask)) == 0

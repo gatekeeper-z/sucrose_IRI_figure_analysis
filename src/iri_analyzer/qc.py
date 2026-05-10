@@ -21,10 +21,16 @@ def build_qc_report(
         f"input_path: {input_path}",
         "",
         "Counts",
-        f"- candidates: {len(candidates)}",
-        f"- final_instances: {len(measurements)}",
+        f"- raw_candidates: {summary.get('n_raw_candidates', len(candidates))}",
+        f"- accepted_candidates: {summary.get('n_accepted_candidates')}",
+        f"- rejected_candidates: {summary.get('n_rejected_candidates')}",
+        f"- raw_instances: {summary.get('n_raw_instances', len(measurements))}",
+        f"- accepted_instances: {summary.get('n_accepted_instances')}",
+        f"- rejected_instances: {summary.get('n_rejected_instances')}",
         f"- edge_excluded: {summary.get('n_edge_excluded')}",
         f"- qc_warnings: {summary.get('n_qc_warning')}",
+        f"- raw_total_actual_area_px2: {summary.get('raw_total_actual_area_px2')}",
+        f"- accepted_total_actual_area_px2: {summary.get('accepted_total_actual_area_px2')}",
         "",
         "Manual QC checklist",
         "- Check 03_background_estimate.png: should contain large-scale shadow, not clear ice-crystal edges.",
@@ -36,10 +42,10 @@ def build_qc_report(
         "",
         "Object warnings",
     ]
-    warned = [m for m in measurements if m.qc_flag != "ok"]
+    warned = [m for m in measurements if m.qc_flag != "ok" or not m.accepted]
     if warned:
         for m in warned:
-            lines.append(f"- id={m.id}: {m.qc_flag}, area_px2={m.actual_area_px2:.0f}, center=({m.center_x:.1f},{m.center_y:.1f})")
+            lines.append(f"- id={m.id}: accepted={m.accepted}, {m.qc_flag}, area_px2={m.actual_area_px2:.0f}, center=({m.center_x:.1f},{m.center_y:.1f})")
     else:
         lines.append("- none")
     skipped = [inst for inst in instances if inst.skipped]
@@ -57,6 +63,7 @@ def build_qc_report(
             "- Hough/LoG candidates are used only for localization.",
             "- actual_area_px2 is measured from the final instance mask.",
             "- circle_area_px2 is a reference field only.",
+            "- accepted_total_actual_area_px2 is the default scientific summary value.",
         ]
     )
     return "\n".join(lines) + "\n"

@@ -1,6 +1,7 @@
 import numpy as np
 
-from iri_analyzer.background import create_protect_mask, estimate_background_masked, flatfield_correct
+from iri_analyzer.background import create_candidate_protect_mask, create_protect_mask, estimate_background_masked, flatfield_correct
+from iri_analyzer.candidates import Candidate
 
 
 def test_masked_background_is_finite_and_same_shape():
@@ -30,3 +31,19 @@ def test_background_handles_all_masked_pixels():
     background = estimate_background_masked(gray, protect, sigma_px=5)
     assert np.isfinite(background).all()
     assert np.all(background >= 1)
+
+
+def test_candidate_protect_mask_respects_fraction_cap():
+    candidates = [
+        Candidate(i, 10 + i * 12, 30, 8, False, "hough", 100 - i)
+        for i in range(1, 15)
+    ]
+    config = {
+        "candidate_protect_radius_scale": 1.3,
+        "candidate_protect_radius_extra_px": 3,
+        "target_protect_mask_fraction_max": 0.25,
+    }
+    mask, used, fraction = create_candidate_protect_mask(candidates, (80, 180), config)
+    assert mask.shape == (80, 180)
+    assert used
+    assert fraction <= 0.30

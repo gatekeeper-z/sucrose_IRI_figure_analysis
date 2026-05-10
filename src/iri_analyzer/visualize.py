@@ -30,10 +30,10 @@ def ensure_bgr(image: np.ndarray) -> np.ndarray:
     return image.copy()
 
 
-def candidate_overlay(base: np.ndarray, candidates: list[Candidate]) -> np.ndarray:
+def candidate_overlay(base: np.ndarray, candidates: list[Candidate], color_override: tuple[int, int, int] | None = None) -> np.ndarray:
     out = ensure_bgr(base)
     for cand in candidates:
-        color = (0, 165, 255) if cand.edge_touching else (0, 255, 0)
+        color = color_override if color_override is not None else ((0, 165, 255) if cand.edge_touching else (0, 255, 0))
         center = (int(round(cand.center_x)), int(round(cand.center_y)))
         radius = int(round(cand.approx_radius_px))
         cv2.circle(out, center, radius, color, 1, lineType=cv2.LINE_AA)
@@ -55,14 +55,32 @@ def contour_points_overlay(base: np.ndarray, instances: list[RefinedInstance]) -
     return out
 
 
-def label_mask(instances: list[RefinedInstance], shape: tuple[int, int]) -> np.ndarray:
+def radial_points_overlay(base: np.ndarray, instances: list[RefinedInstance], point_kind: str) -> np.ndarray:
+    out = ensure_bgr(base)
+    color = (0, 255, 0) if point_kind == "reliable" else (0, 0, 255)
+    for inst in instances:
+        pts = inst.reliable_points if point_kind == "reliable" else inst.rejected_points
+        if pts is None or pts.size == 0:
+            continue
+        pts_i = np.round(pts).astype(np.int32)
+        for p in pts_i:
+            cv2.circle(out, tuple(p), 1, color, -1, lineType=cv2.LINE_AA)
+    return out
+
+
+def label_mask(instances: list[RefinedInstance], shape: tuple[int, int], measurements: list[CrystalMeasurement] | None = None) -> np.ndarray:
     labels = np.zeros(shape[:2], dtype=np.uint16)
-    label = 1
+    by_candidate_id = {m.candidate_id: m for m in measurements or []}
     for inst in instances:
         if inst.skipped:
             continue
-        labels[inst.mask] = label
-        label += 1
+        measurement = by_candidate_id.get(inst.candidate.candidate_id)
+        if measurement is not None:
+            if not measurement.accepted:
+                continue
+            labels[inst.mask] = int(measurement.id)
+        elif measurements is None:
+            labels[inst.mask] = int(labels.max()) + 1
     return labels
 
 
@@ -79,17 +97,18 @@ def colorize_labels(labels: np.ndarray) -> np.ndarray:
 
 def final_overlay(base: np.ndarray, instances: list[RefinedInstance], measurements: list[CrystalMeasurement]) -> np.ndarray:
     out = ensure_bgr(base)
-    by_candidate = {m.center_x: m for m in measurements}
-    label = 1
+    by_candidate_id = {m.candidate_id: m for m in measurements}
     for inst in instances:
         if inst.skipped:
             continue
+        measurement = by_candidate_id.get(inst.candidate.candidate_id)
+        if measurement is not None and not measurement.accepted:
+            continue
         contours, _ = cv2.findContours(inst.mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(out, contours, -1, (0, 255, 255), 1, lineType=cv2.LINE_AA)
-        c = inst.candidate
-        cv2.putText(out, str(label), (int(c.center_x) + 3, int(c.center_y) + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
-        label += 1
-    _ = by_candidate
+        if measurement is not None:
+            c = inst.candidate
+            cv2.putText(out, str(measurement.id), (int(c.center_x) + 3, int(c.center_y) + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
     return out
 
 

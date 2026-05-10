@@ -6,6 +6,8 @@ import math
 import cv2
 import numpy as np
 
+from .preprocess import gradient_magnitude
+
 
 @dataclass
 class Candidate:
@@ -16,6 +18,12 @@ class Candidate:
     edge_touching: bool
     method: str
     score: float
+    ring_gradient_strength: float | None = None
+    edge_coverage_fraction: float | None = None
+    inside_outside_contrast: float | None = None
+    local_noise_level: float | None = None
+    accepted: bool = True
+    reject_reason: str = ""
 
     def to_dict(self, image_id: str) -> dict:
         row = asdict(self)
@@ -37,9 +45,139 @@ def detect_candidates(gray: np.ndarray, config: dict) -> list[Candidate]:
     return candidates
 
 
+def validate_candidates(gray: np.ndarray, candidates: list[Candidate], config: dict) -> tuple[list[Candidate], list[Candidate]]:
+    """Validate raw localization candidates before contour refinement."""
+    if not bool(config.get("candidate_validation_enabled", True)):
+        for cand in candidates:
+            cand.accepted = True
+            cand.reject_reason = ""
+        return candidates, []
+
+    grad = gradient_magnitude(gray)
+    accepted: list[Candidate] = []
+    rejected: list[Candidate] = []
+    for cand in candidates:
+        metrics = candidate_validation_metrics(gray, grad, cand, config)
+        cand.ring_gradient_strength = metrics["ring_gradient_strength"]
+        cand.edge_coverage_fraction = metrics["edge_coverage_fraction"]
+        cand.inside_outside_contrast = metrics["inside_outside_contrast"]
+        cand.local_noise_level = metrics["local_noise_level"]
+        reasons: list[str] = []
+        if cand.approx_radius_px < float(config["min_radius_px"]) or cand.approx_radius_px > float(config["max_radius_px"]):
+            reasons.append("radius_out_of_range")
+        if bool(config.get("exclude_edge_touching", True)) and cand.edge_touching:
+            reasons.append("edge_touching")
+        if cand.edge_coverage_fraction < float(config.get("min_edge_coverage_fraction", 0.45)):
+            reasons.append("low_edge_coverage")
+        noise = max(cand.local_noise_level, 1e-6)
+        if cand.ring_gradient_strength < noise * float(config.get("ring_gradient_noise_ratio_min", 1.5)):
+            reasons.append("weak_ring_gradient")
+        contrast_min = config.get("inside_outside_contrast_min")
+        if contrast_min is not None and cand.inside_outside_contrast < float(contrast_min):
+            reasons.append("low_inside_outside_contrast")
+        cand.accepted = not reasons
+        cand.reject_reason = ";".join(reasons)
+        if cand.accepted:
+            accepted.append(cand)
+        else:
+            rejected.append(cand)
+    return accepted, rejected
+
+
+def candidate_validation_metrics(gray: np.ndarray, grad: np.ndarray, candidate: Candidate, config: dict) -> dict:
+    n_angles = int(config.get("contour_n_angles", 72))
+    approx_r = float(candidate.approx_radius_px)
+    min_r = max(1.0, 0.65 * approx_r)
+    max_r = 1.35 * approx_r + 3.0
+    radii = np.linspace(min_r, max_r, max(8, int(math.ceil(max_r - min_r)) + 1), dtype=np.float32)
+    angles = np.linspace(0, 2 * np.pi, n_angles, endpoint=False)
+    peak_values: list[float] = []
+    edge_hits = 0
+    noise = _local_noise_level(grad, candidate)
+    threshold = max(noise * float(config.get("ring_gradient_noise_ratio_min", 1.5)), 1e-6)
+    for theta in angles:
+        xs = candidate.center_x + radii * math.cos(theta)
+        ys = candidate.center_y + radii * math.sin(theta)
+        values = sample_bilinear(grad, xs, ys)
+        finite = np.isfinite(values)
+        if not np.any(finite):
+            continue
+        peak = float(np.nanmax(values))
+        peak_values.append(peak)
+        if peak >= threshold:
+            edge_hits += 1
+    ring_strength = float(np.percentile(peak_values, 75)) if peak_values else 0.0
+    coverage = float(edge_hits / n_angles) if n_angles > 0 else 0.0
+    contrast = _inside_outside_contrast(gray, candidate)
+    return {
+        "ring_gradient_strength": ring_strength,
+        "edge_coverage_fraction": coverage,
+        "inside_outside_contrast": contrast,
+        "local_noise_level": noise,
+    }
+
+
+def sample_bilinear(image: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    h, w = image.shape[:2]
+    inside = (xs >= 0) & (ys >= 0) & (xs <= w - 1) & (ys <= h - 1)
+    map_x = xs.astype(np.float32).reshape(1, -1)
+    map_y = ys.astype(np.float32).reshape(1, -1)
+    sampled = cv2.remap(
+        image.astype(np.float32),
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=np.nan,
+    )
+    out = sampled.reshape(-1)
+    out[~inside] = np.nan
+    return out
+
+
 def _edge_touching(x: float, y: float, r: float, shape: tuple[int, int]) -> bool:
     h, w = shape[:2]
     return x - r <= 0 or y - r <= 0 or x + r >= w - 1 or y + r >= h - 1
+
+
+def _local_noise_level(grad: np.ndarray, candidate: Candidate) -> float:
+    h, w = grad.shape[:2]
+    r = float(candidate.approx_radius_px)
+    pad = int(math.ceil(2.4 * r + 4))
+    x0 = max(0, int(candidate.center_x) - pad)
+    x1 = min(w, int(candidate.center_x) + pad + 1)
+    y0 = max(0, int(candidate.center_y) - pad)
+    y1 = min(h, int(candidate.center_y) + pad + 1)
+    roi = grad[y0:y1, x0:x1]
+    if roi.size == 0:
+        return 0.0
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    dist = np.hypot(xx - candidate.center_x, yy - candidate.center_y)
+    noise_mask = (dist >= 1.55 * r) & (dist <= 2.30 * r)
+    values = roi[noise_mask]
+    if values.size < 16:
+        values = roi.reshape(-1)
+    return float(np.percentile(values, 75)) if values.size else 0.0
+
+
+def _inside_outside_contrast(gray: np.ndarray, candidate: Candidate) -> float:
+    h, w = gray.shape[:2]
+    r = float(candidate.approx_radius_px)
+    pad = int(math.ceil(1.7 * r + 4))
+    x0 = max(0, int(candidate.center_x) - pad)
+    x1 = min(w, int(candidate.center_x) + pad + 1)
+    y0 = max(0, int(candidate.center_y) - pad)
+    y1 = min(h, int(candidate.center_y) + pad + 1)
+    roi = gray[y0:y1, x0:x1].astype(np.float32)
+    if roi.size == 0:
+        return 0.0
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    dist = np.hypot(xx - candidate.center_x, yy - candidate.center_y)
+    inside = roi[dist <= 0.65 * r]
+    outside = roi[(dist >= 1.10 * r) & (dist <= 1.45 * r)]
+    if inside.size == 0 or outside.size == 0:
+        return 0.0
+    return float(abs(np.mean(inside) - np.mean(outside)))
 
 
 def _detect_hough(gray: np.ndarray, config: dict) -> list[Candidate]:

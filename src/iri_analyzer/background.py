@@ -3,6 +3,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from .candidates import Candidate
 from .preprocess import gradient_magnitude, median_blur, normalize_to_uint8
 
 
@@ -39,6 +40,34 @@ def estimate_background_masked(gray: np.ndarray, protect_mask: np.ndarray, sigma
     background[~np.isfinite(background)] = fallback
     background = np.maximum(background, 1.0)
     return background.astype(np.float32)
+
+
+def estimate_background_unmasked(gray: np.ndarray, sigma_px: float) -> np.ndarray:
+    background = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), sigmaX=float(sigma_px), sigmaY=float(sigma_px))
+    background = np.maximum(background, 1.0)
+    return background.astype(np.float32)
+
+
+def create_candidate_protect_mask(candidates: list[Candidate], shape: tuple[int, int], config: dict) -> tuple[np.ndarray, list[Candidate], float]:
+    """Create a protect mask from candidate circles, capped by target mask fraction."""
+    h, w = shape[:2]
+    target_max = float(config.get("target_protect_mask_fraction_max", 0.45))
+    radius_scale = float(config.get("candidate_protect_radius_scale", 1.3))
+    radius_extra = float(config.get("candidate_protect_radius_extra_px", 3))
+    mask = np.zeros((h, w), dtype=np.uint8)
+    used: list[Candidate] = []
+    for cand in sorted(candidates, key=lambda c: c.score, reverse=True):
+        trial = mask.copy()
+        radius = int(round(cand.approx_radius_px * radius_scale + radius_extra))
+        cv2.circle(trial, (int(round(cand.center_x)), int(round(cand.center_y))), max(radius, 1), 1, -1)
+        frac = float(np.mean(trial > 0))
+        if frac > target_max and used:
+            continue
+        mask = trial
+        used.append(cand)
+        if float(np.mean(mask > 0)) >= target_max:
+            break
+    return mask.astype(bool), used, float(np.mean(mask > 0))
 
 
 def flatfield_correct(gray: np.ndarray, background: np.ndarray) -> np.ndarray:

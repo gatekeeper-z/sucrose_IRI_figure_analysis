@@ -6,8 +6,16 @@ from pathlib import Path
 
 import numpy as np
 
-from .background import background_visual, corrected_visual, create_protect_mask, estimate_background_masked, flatfield_correct
-from .candidates import Candidate, detect_candidates
+from .background import (
+    background_visual,
+    corrected_visual,
+    create_candidate_protect_mask,
+    create_protect_mask,
+    estimate_background_masked,
+    estimate_background_unmasked,
+    flatfield_correct,
+)
+from .candidates import Candidate, detect_candidates, validate_candidates
 from .contour_refine import RefinedInstance, refine_candidates
 from .io import (
     collect_images,
@@ -29,6 +37,7 @@ from .visualize import (
     final_overlay,
     label_mask,
     label_overlay,
+    radial_points_overlay,
     save_area_histogram,
     save_image,
 )
@@ -43,11 +52,18 @@ CANDIDATE_COLUMNS = [
     "edge_touching",
     "method",
     "score",
+    "ring_gradient_strength",
+    "edge_coverage_fraction",
+    "inside_outside_contrast",
+    "local_noise_level",
+    "accepted",
+    "reject_reason",
 ]
 
 CRYSTAL_COLUMNS = [
     "image_id",
     "id",
+    "candidate_id",
     "center_x",
     "center_y",
     "approx_radius_px",
@@ -63,7 +79,13 @@ CRYSTAL_COLUMNS = [
     "radial_radius_range_px",
     "edge_touching",
     "overlap_trimmed_fraction",
+    "reliable_ray_fraction",
+    "edge_coverage_fraction",
+    "ring_gradient_strength",
+    "inside_outside_contrast",
+    "local_noise_level",
     "qc_flag",
+    "accepted",
 ]
 
 SENSITIVITY_COLUMNS = [
@@ -83,6 +105,8 @@ class ImageResult:
     image_id: str
     input_path: str
     candidates: list[Candidate]
+    accepted_candidates: list[Candidate]
+    rejected_candidates: list[Candidate]
     instances: list[RefinedInstance]
     crystals: list[CrystalMeasurement]
     summary: dict
@@ -98,18 +122,31 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
 
     original = read_image(path)
     gray = to_gray(original)
-    protect_mask = create_protect_mask(gray, config)
-    background = estimate_background_masked(gray, protect_mask, float(config["background_sigma_px"]))
+
+    gradient_protect_mask = create_protect_mask(gray, config)
+    rough_background = estimate_background_unmasked(gray, float(config["background_sigma_px"]))
+    corrected_prelim = flatfield_correct(gray, rough_background)
+    corrected_prelim_uint8 = corrected_visual(corrected_prelim)
+    prelim_clahe = apply_clahe(corrected_prelim_uint8, float(config["clahe_clip_limit"]), config["clahe_tile_grid_size"])
+    prelim_candidates = detect_candidates(prelim_clahe, config)
+    protect_mask, protect_candidates, protect_fraction = create_candidate_protect_mask(prelim_candidates, gray.shape, config)
+    if protect_fraction > float(config.get("target_protect_mask_fraction_max", 0.45)):
+        warnings.append(f"candidate_protect_mask_fraction={protect_fraction:.3f} exceeds target")
+
+    if str(config.get("background_mode", "two_pass_candidate_protect")) == "two_pass_candidate_protect":
+        background = estimate_background_masked(gray, protect_mask, float(config["background_sigma_px"]))
+    else:
+        background = estimate_background_masked(gray, gradient_protect_mask, float(config["background_sigma_px"]))
     corrected = flatfield_correct(gray, background)
     corrected_uint8 = corrected_visual(corrected)
     clahe = apply_clahe(corrected_uint8, float(config["clahe_clip_limit"]), config["clahe_tile_grid_size"])
     candidates = detect_candidates(clahe, config)
+    accepted_candidates, rejected_candidates = validate_candidates(clahe, candidates, config)
 
     n_edge_excluded = 0
-    refine_input = candidates
+    refine_input = accepted_candidates
     if bool(config.get("exclude_edge_touching", True)):
         n_edge_excluded = sum(c.edge_touching for c in candidates)
-        refine_input = [c for c in candidates if not c.edge_touching]
     instances = refine_candidates(clahe, refine_input, config)
     crystals = measure_instances(image_id, instances, config)
     summary = summarize(
@@ -121,7 +158,12 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
         measurements=crystals,
         config=config,
         error_list=errors,
+        n_accepted_candidates=len(accepted_candidates),
+        n_rejected_candidates=len(rejected_candidates),
     )
+    summary["candidate_protect_mask_fraction"] = protect_fraction
+    summary["n_prelim_candidates"] = len(prelim_candidates)
+    summary["n_protect_candidates_used"] = len(protect_candidates)
 
     if output_dir is not None:
         save_outputs(
@@ -129,11 +171,14 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
             image_id,
             original,
             gray,
+            gradient_protect_mask,
             protect_mask,
             background,
             corrected,
             clahe,
             candidates,
+            accepted_candidates,
+            rejected_candidates,
             instances,
             crystals,
             summary,
@@ -144,6 +189,8 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
         image_id=image_id,
         input_path=str(path),
         candidates=candidates,
+        accepted_candidates=accepted_candidates,
+        rejected_candidates=rejected_candidates,
         instances=instances,
         crystals=crystals,
         summary=summary,
@@ -157,11 +204,14 @@ def save_outputs(
     image_id: str,
     original,
     gray,
+    gradient_protect_mask,
     protect_mask,
     background,
     corrected,
     clahe,
     candidates,
+    accepted_candidates,
+    rejected_candidates,
     instances,
     crystals,
     summary,
@@ -170,22 +220,33 @@ def save_outputs(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     save_intermediate = bool(config.get("save_intermediate", True))
-    labels = label_mask(instances, gray.shape)
+    labels = label_mask(instances, gray.shape, crystals)
     if save_intermediate:
         save_image(output_dir / "00_original.png", original)
         save_image(output_dir / "01_gray.png", gray)
+        save_image(output_dir / "02a_gradient_protect_mask_debug.png", gradient_protect_mask)
+        save_image(output_dir / "02b_candidate_protect_mask.png", protect_mask)
         save_image(output_dir / "02_protect_mask.png", protect_mask)
         save_image(output_dir / "03_background_estimate.png", background_visual(background))
         save_image(output_dir / "04_flatfield_corrected.png", corrected_visual(corrected))
         save_image(output_dir / "05_bg_corrected_clahe.png", clahe)
-        save_image(output_dir / "06_candidate_localization_overlay.png", candidate_overlay(gray, candidates))
+        save_image(output_dir / "06a_candidate_raw_overlay.png", candidate_overlay(gray, candidates))
+        save_image(output_dir / "06b_candidate_accepted_overlay.png", candidate_overlay(gray, accepted_candidates, color_override=(0, 255, 0)))
+        save_image(output_dir / "06c_candidate_rejected_overlay.png", candidate_overlay(gray, rejected_candidates, color_override=(0, 0, 255)))
+        save_image(output_dir / "06_candidate_localization_overlay.png", candidate_overlay(gray, accepted_candidates))
+        save_image(output_dir / "07a_radial_reliable_points_overlay.png", radial_points_overlay(gray, instances, "reliable"))
+        save_image(output_dir / "07b_radial_rejected_points_overlay.png", radial_points_overlay(gray, instances, "rejected"))
+        save_image(output_dir / "07c_contour_refined_overlay.png", contour_points_overlay(gray, [inst for inst in instances if not inst.skipped]))
         save_image(output_dir / "07_contour_points_overlay.png", contour_points_overlay(gray, instances))
         save_image(output_dir / "08_instance_masks.png", colorize_labels(labels))
         save_image(output_dir / "09_final_mask.png", labels > 0)
         save_image(output_dir / "10_final_overlay.png", final_overlay(gray, instances, crystals))
         save_image(output_dir / "11_label_overlay.png", label_overlay(gray, labels))
-        save_area_histogram(output_dir / "12_area_histogram.png", crystals)
-    write_csv(output_dir / "candidates.csv", [c.to_dict(image_id) for c in candidates], CANDIDATE_COLUMNS)
+        save_area_histogram(output_dir / "12_area_histogram.png", [c for c in crystals if c.accepted])
+    write_csv(output_dir / "candidates_raw.csv", [c.to_dict(image_id) for c in candidates], CANDIDATE_COLUMNS)
+    write_csv(output_dir / "candidates_accepted.csv", [c.to_dict(image_id) for c in accepted_candidates], CANDIDATE_COLUMNS)
+    write_csv(output_dir / "candidates_rejected.csv", [c.to_dict(image_id) for c in rejected_candidates], CANDIDATE_COLUMNS)
+    write_csv(output_dir / "candidates.csv", [c.to_dict(image_id) for c in accepted_candidates], CANDIDATE_COLUMNS)
     write_csv(output_dir / "crystals.csv", [c.to_dict() for c in crystals], CRYSTAL_COLUMNS)
     write_json(output_dir / "summary.json", summary)
     write_yaml(output_dir / "config_used.yaml", config)

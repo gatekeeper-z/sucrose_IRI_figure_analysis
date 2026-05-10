@@ -6,7 +6,7 @@ import math
 import cv2
 import numpy as np
 
-from .candidates import Candidate
+from .candidates import Candidate, sample_bilinear
 from .preprocess import gradient_magnitude
 
 
@@ -20,6 +20,9 @@ class RefinedInstance:
     overlap_trimmed_fraction: float
     skipped: bool
     skip_reason: str = ""
+    reliable_ray_fraction: float = 0.0
+    reliable_points: np.ndarray | None = None
+    rejected_points: np.ndarray | None = None
 
 
 def refine_candidates(image_for_edges: np.ndarray, candidates: list[Candidate], config: dict) -> list[RefinedInstance]:
@@ -58,33 +61,55 @@ def refine_candidate(gradient: np.ndarray, candidate: Candidate, config: dict) -
     r_max = float(config["radial_search_max_scale"]) * approx_r + float(config["radial_search_extra_px"])
     radii_samples = np.linspace(r_min, r_max, max(8, int(math.ceil(r_max - r_min)) + 1), dtype=np.float32)
     found = np.full(n_angles, np.nan, dtype=np.float32)
-    valid = np.zeros(n_angles, dtype=bool)
+    reliable = np.zeros(n_angles, dtype=bool)
     nearmax_fraction = float(config["radial_peak_nearmax_fraction"])
+    noise = candidate.local_noise_level if candidate.local_noise_level is not None else _estimate_local_gradient_noise(gradient, candidate)
+    ring_strength = candidate.ring_gradient_strength if candidate.ring_gradient_strength is not None else 0.0
+    ray_threshold = max(float(noise) * 1.25, float(ring_strength) * 0.35, 1e-6)
+    rejected_points: list[tuple[float, float]] = []
     for i, theta in enumerate(angles):
         xs = candidate.center_x + radii_samples * math.cos(theta)
         ys = candidate.center_y + radii_samples * math.sin(theta)
-        values = _sample_bilinear(gradient, xs, ys)
+        values = sample_bilinear(gradient, xs, ys)
         finite = np.isfinite(values)
         if not np.any(finite):
             continue
         values = values.astype(np.float32)
         values[~finite] = 0
         max_val = float(values.max())
-        if max_val <= 0:
+        peak_idx = int(np.argmax(values))
+        if max_val < ray_threshold:
+            rejected_points.append((float(xs[peak_idx]), float(ys[peak_idx])))
             continue
         eligible = np.where(values >= nearmax_fraction * max_val)[0]
         if eligible.size:
-            idx = int(eligible[np.argmin(np.abs(radii_samples[eligible] - approx_r))])
+            if bool(config.get("prefer_outer_edge", True)):
+                idx = int(eligible[-1])
+            else:
+                idx = int(eligible[np.argmin(np.abs(radii_samples[eligible] - approx_r))])
         else:
-            idx = int(np.argmax(values))
+            idx = peak_idx
         found[i] = radii_samples[idx]
-        valid[i] = True
-    valid_fraction = float(valid.mean()) if valid.size else 0.0
-    if not np.any(valid):
-        found[:] = approx_r
-    else:
-        found = _fill_missing_circular(found)
+        reliable[i] = True
+    reliable_ray_fraction = float(reliable.mean()) if reliable.size else 0.0
+    if reliable_ray_fraction < float(config.get("min_reliable_ray_fraction", config.get("min_valid_radial_fraction", 0.60))):
+        return RefinedInstance(
+            candidate=candidate,
+            mask=np.zeros(gradient.shape[:2], dtype=bool),
+            contour_points=np.empty((0, 2), dtype=np.float32),
+            radial_radii=found,
+            valid_fraction=reliable_ray_fraction,
+            overlap_trimmed_fraction=0.0,
+            skipped=True,
+            skip_reason="low_reliable_ray_fraction",
+            reliable_ray_fraction=reliable_ray_fraction,
+            reliable_points=_points_from_radii(candidate, angles, found, reliable),
+            rejected_points=np.array(rejected_points, dtype=np.float32) if rejected_points else np.empty((0, 2), dtype=np.float32),
+        )
+    found = _fill_missing_circular(found)
+    found = _limit_neighbor_jumps(found, approx_r, config)
     smoothed = _smooth_radii(found, float(config["radial_smoothing_sigma"]))
+    smoothed = _limit_neighbor_jumps(smoothed, approx_r, config)
     points = np.column_stack(
         [
             candidate.center_x + smoothed * np.cos(angles),
@@ -92,28 +117,51 @@ def refine_candidate(gradient: np.ndarray, candidate: Candidate, config: dict) -
         ]
     ).astype(np.float32)
     mask = _polygon_to_mask(points, gradient.shape)
-    skipped = valid_fraction < float(config.get("min_valid_radial_fraction", 0.60))
     return RefinedInstance(
         candidate=candidate,
         mask=mask,
         contour_points=points,
         radial_radii=smoothed.astype(np.float32),
-        valid_fraction=valid_fraction,
+        valid_fraction=reliable_ray_fraction,
         overlap_trimmed_fraction=0.0,
-        skipped=skipped,
-        skip_reason="low_valid_radial_fraction" if skipped else "",
+        skipped=False,
+        skip_reason="",
+        reliable_ray_fraction=reliable_ray_fraction,
+        reliable_points=_points_from_radii(candidate, angles, found, reliable),
+        rejected_points=np.array(rejected_points, dtype=np.float32) if rejected_points else np.empty((0, 2), dtype=np.float32),
     )
 
 
-def _sample_bilinear(image: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-    h, w = image.shape[:2]
-    inside = (xs >= 0) & (ys >= 0) & (xs <= w - 1) & (ys <= h - 1)
-    map_x = xs.astype(np.float32).reshape(1, -1)
-    map_y = ys.astype(np.float32).reshape(1, -1)
-    sampled = cv2.remap(image.astype(np.float32), map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=np.nan)
-    out = sampled.reshape(-1)
-    out[~inside] = np.nan
-    return out
+def _points_from_radii(candidate: Candidate, angles: np.ndarray, radii: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    if not np.any(mask):
+        return np.empty((0, 2), dtype=np.float32)
+    selected_angles = angles[mask]
+    selected_radii = radii[mask]
+    return np.column_stack(
+        [
+            candidate.center_x + selected_radii * np.cos(selected_angles),
+            candidate.center_y + selected_radii * np.sin(selected_angles),
+        ]
+    ).astype(np.float32)
+
+
+def _estimate_local_gradient_noise(gradient: np.ndarray, candidate: Candidate) -> float:
+    h, w = gradient.shape[:2]
+    r = float(candidate.approx_radius_px)
+    pad = int(math.ceil(2.2 * r + 4))
+    x0 = max(0, int(candidate.center_x) - pad)
+    x1 = min(w, int(candidate.center_x) + pad + 1)
+    y0 = max(0, int(candidate.center_y) - pad)
+    y1 = min(h, int(candidate.center_y) + pad + 1)
+    roi = gradient[y0:y1, x0:x1]
+    if roi.size == 0:
+        return 0.0
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    dist = np.hypot(xx - candidate.center_x, yy - candidate.center_y)
+    values = roi[(dist >= 1.55 * r) & (dist <= 2.25 * r)]
+    if values.size < 16:
+        values = roi.reshape(-1)
+    return float(np.percentile(values, 75)) if values.size else 0.0
 
 
 def _fill_missing_circular(radii: np.ndarray) -> np.ndarray:
@@ -144,6 +192,26 @@ def _smooth_radii(radii: np.ndarray, sigma: float) -> np.ndarray:
     kernel /= kernel.sum()
     wrapped = np.concatenate([medianed[-radius:], medianed, medianed[:radius]])
     return np.convolve(wrapped, kernel, mode="valid").astype(np.float32)
+
+
+def _limit_neighbor_jumps(radii: np.ndarray, approx_radius: float, config: dict) -> np.ndarray:
+    if radii.size < 3:
+        return radii.astype(np.float32)
+    out = radii.astype(np.float32).copy()
+    max_jump = max(
+        float(config.get("max_neighbor_radius_jump_px", 4)),
+        float(config.get("max_neighbor_radius_jump_fraction", 0.18)) * float(approx_radius),
+    )
+    for _ in range(2):
+        for i in range(1, out.size):
+            delta = out[i] - out[i - 1]
+            if abs(delta) > max_jump:
+                out[i] = out[i - 1] + np.sign(delta) * max_jump
+        for i in range(out.size - 2, -1, -1):
+            delta = out[i] - out[i + 1]
+            if abs(delta) > max_jump:
+                out[i] = out[i + 1] + np.sign(delta) * max_jump
+    return out.astype(np.float32)
 
 
 def _polygon_to_mask(points: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
