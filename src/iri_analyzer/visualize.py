@@ -36,7 +36,17 @@ def candidate_overlay(base: np.ndarray, candidates: list[Candidate], color_overr
         color = color_override if color_override is not None else ((0, 165, 255) if cand.edge_touching else (0, 255, 0))
         center = (int(round(cand.center_x)), int(round(cand.center_y)))
         radius = int(round(cand.approx_radius_px))
-        cv2.circle(out, center, radius, color, 1, lineType=cv2.LINE_AA)
+        if cand.bbox_x is not None and cand.bbox_y is not None and cand.bbox_w is not None and cand.bbox_h is not None:
+            cv2.rectangle(
+                out,
+                (int(cand.bbox_x), int(cand.bbox_y)),
+                (int(cand.bbox_x + cand.bbox_w), int(cand.bbox_y + cand.bbox_h)),
+                color,
+                1,
+                lineType=cv2.LINE_AA,
+            )
+        else:
+            cv2.circle(out, center, radius, color, 1, lineType=cv2.LINE_AA)
         cv2.circle(out, center, 2, (0, 0, 255), -1, lineType=cv2.LINE_AA)
         cv2.putText(out, str(cand.candidate_id), (center[0] + 3, center[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
     return out

@@ -18,11 +18,15 @@ ENV/
 build/
 dist/
 *.egg-info/
+web/node_modules/
+web/.vite/
 
 # Local analysis outputs
 results/
 results_*/
 results_*.zip
+.playwright-mcp/
+iri-web-*.png
 
 # Logs and temporary files
 *.log

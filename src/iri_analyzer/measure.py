@@ -33,6 +33,19 @@ class CrystalMeasurement:
     ring_gradient_strength: float | None
     inside_outside_contrast: float | None
     local_noise_level: float | None
+    shape_type: str
+    refine_method: str
+    boundary_gradient_strength: float | None
+    contour_closure_score: float | None
+    solidity: float | None
+    extent: float | None
+    rectangularity: float | None
+    corner_count: int | None
+    shape_score: float | None
+    split_parent_id: int | None
+    split_child_index: int | None
+    cluster_split: bool
+    cluster_split_confidence: float | None
     qc_flag: str
     accepted: bool
 
@@ -65,6 +78,8 @@ def measure_instances(image_id: str, instances: list[RefinedInstance], config: d
             edge_touching=cand.edge_touching,
             overlap_trimmed_fraction=inst.overlap_trimmed_fraction,
             config=config,
+            shape_type=cand.shape_type,
+            refine_method=inst.refine_method,
         )
         if inst.skipped:
             flags.append(inst.skip_reason or "contour_rejected")
@@ -95,6 +110,19 @@ def measure_instances(image_id: str, instances: list[RefinedInstance], config: d
                 ring_gradient_strength=cand.ring_gradient_strength,
                 inside_outside_contrast=cand.inside_outside_contrast,
                 local_noise_level=cand.local_noise_level,
+                shape_type=str(cand.shape_type),
+                refine_method=str(inst.refine_method),
+                boundary_gradient_strength=cand.boundary_gradient_strength,
+                contour_closure_score=cand.contour_closure_score,
+                solidity=cand.solidity,
+                extent=cand.extent,
+                rectangularity=cand.rectangularity,
+                corner_count=cand.corner_count,
+                shape_score=cand.shape_score,
+                split_parent_id=inst.split_parent_id,
+                split_child_index=inst.split_child_index,
+                cluster_split=bool(inst.cluster_split),
+                cluster_split_confidence=inst.cluster_split_confidence,
                 qc_flag=qc_flag,
                 accepted=bool(accepted),
             )
@@ -111,11 +139,14 @@ def qc_flags(
     edge_touching: bool,
     overlap_trimmed_fraction: float,
     config: dict,
+    shape_type: str = "round",
+    refine_method: str = "radial",
 ) -> list[str]:
     flags: list[str] = []
-    if not np.isfinite(area_over_circle) or area_over_circle < 0.5 or area_over_circle > 1.8:
+    is_radial_round = shape_type == "round" and refine_method == "radial"
+    if is_radial_round and (not np.isfinite(area_over_circle) or area_over_circle < 0.5 or area_over_circle > 1.8):
         flags.append("area_over_circle")
-    if radial_range > 0.8 * approx_radius:
+    if is_radial_round and radial_range > 0.8 * approx_radius:
         flags.append("radial_radius_range")
     if overlap_trimmed_fraction > float(config["max_overlap_qc_fraction"]):
         flags.append("overlap_trimmed")
@@ -181,9 +212,37 @@ def summarize(
         "config": config,
         "error_list": error_list or [],
     }
+    for shape_name, accepted_shape in _shape_group_stats(accepted_measurements).items():
+        summary[f"n_accepted_{shape_name}_instances"] = accepted_shape["count"]
+        summary[f"accepted_{shape_name}_area_px2"] = accepted_shape["area"]
     # Backward-compatible aliases now point to accepted scientific statistics.
     summary["n_candidates"] = summary["n_raw_candidates"]
     summary["n_final_instances"] = summary["n_accepted_instances"]
     summary["total_actual_area_px2"] = summary["accepted_total_actual_area_px2"]
     summary["total_actual_area_um2"] = summary["accepted_total_actual_area_um2"]
     return summary
+
+
+def _shape_group_stats(measurements: list[CrystalMeasurement]) -> dict[str, dict]:
+    groups = {
+        "round": [],
+        "square": [],
+        "polygonal": [],
+        "cluster_split": [],
+    }
+    for measurement in measurements:
+        if measurement.cluster_split:
+            groups["cluster_split"].append(measurement)
+        elif measurement.shape_type in {"square_like", "rectangular"}:
+            groups["square"].append(measurement)
+        elif measurement.shape_type in {"polygonal", "cluster"}:
+            groups["polygonal"].append(measurement)
+        else:
+            groups["round"].append(measurement)
+    return {
+        key: {
+            "count": int(len(items)),
+            "area": float(sum(item.actual_area_px2 for item in items)),
+        }
+        for key, items in groups.items()
+    }

@@ -15,7 +15,7 @@ from .background import (
     estimate_background_unmasked,
     flatfield_correct,
 )
-from .candidates import Candidate, detect_candidates, validate_candidates
+from .candidates import Candidate, detect_candidates, run_square_preflight, validate_candidates
 from .contour_refine import RefinedInstance, refine_candidates
 from .io import (
     collect_images,
@@ -58,6 +58,21 @@ CANDIDATE_COLUMNS = [
     "local_noise_level",
     "accepted",
     "reject_reason",
+    "shape_type",
+    "candidate_method",
+    "bbox_x",
+    "bbox_y",
+    "bbox_w",
+    "bbox_h",
+    "shape_score",
+    "boundary_gradient_strength",
+    "contour_closure_score",
+    "solidity",
+    "extent",
+    "rectangularity",
+    "circularity",
+    "corner_count",
+    "local_background_rejection_score",
 ]
 
 CRYSTAL_COLUMNS = [
@@ -84,6 +99,19 @@ CRYSTAL_COLUMNS = [
     "ring_gradient_strength",
     "inside_outside_contrast",
     "local_noise_level",
+    "shape_type",
+    "refine_method",
+    "boundary_gradient_strength",
+    "contour_closure_score",
+    "solidity",
+    "extent",
+    "rectangularity",
+    "corner_count",
+    "shape_score",
+    "split_parent_id",
+    "split_child_index",
+    "cluster_split",
+    "cluster_split_confidence",
     "qc_flag",
     "accepted",
 ]
@@ -128,27 +156,34 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
     corrected_prelim = flatfield_correct(gray, rough_background)
     corrected_prelim_uint8 = corrected_visual(corrected_prelim)
     prelim_clahe = apply_clahe(corrected_prelim_uint8, float(config["clahe_clip_limit"]), config["clahe_tile_grid_size"])
-    prelim_candidates = detect_candidates(prelim_clahe, config)
-    protect_mask, protect_candidates, protect_fraction = create_candidate_protect_mask(prelim_candidates, gray.shape, config)
+    prelim_candidates = detect_candidates(prelim_clahe, config, include_square=False)
+    square_preflight_candidates, square_gate = run_square_preflight(prelim_clahe, prelim_candidates, config)
+    square_strategy_used = bool(square_gate["square_strategy_used"])
+    adhesion_strategy_used = _decide_adhesion_strategy(square_gate, config)
+    runtime_config = dict(config)
+    runtime_config["_square_strategy_used"] = square_strategy_used
+    runtime_config["_adhesion_strategy_used"] = adhesion_strategy_used
+    protect_source_candidates = prelim_candidates + square_preflight_candidates if square_strategy_used else prelim_candidates
+    protect_mask, protect_candidates, protect_fraction = create_candidate_protect_mask(protect_source_candidates, gray.shape, runtime_config)
     if protect_fraction > float(config.get("target_protect_mask_fraction_max", 0.45)):
         warnings.append(f"candidate_protect_mask_fraction={protect_fraction:.3f} exceeds target")
 
     if str(config.get("background_mode", "two_pass_candidate_protect")) == "two_pass_candidate_protect":
-        background = estimate_background_masked(gray, protect_mask, float(config["background_sigma_px"]))
+        background = estimate_background_masked(gray, protect_mask, float(runtime_config["background_sigma_px"]))
     else:
-        background = estimate_background_masked(gray, gradient_protect_mask, float(config["background_sigma_px"]))
+        background = estimate_background_masked(gray, gradient_protect_mask, float(runtime_config["background_sigma_px"]))
     corrected = flatfield_correct(gray, background)
     corrected_uint8 = corrected_visual(corrected)
-    clahe = apply_clahe(corrected_uint8, float(config["clahe_clip_limit"]), config["clahe_tile_grid_size"])
-    candidates = detect_candidates(clahe, config)
-    accepted_candidates, rejected_candidates = validate_candidates(clahe, candidates, config)
+    clahe = apply_clahe(corrected_uint8, float(runtime_config["clahe_clip_limit"]), runtime_config["clahe_tile_grid_size"])
+    candidates = detect_candidates(clahe, runtime_config, include_square=square_strategy_used)
+    accepted_candidates, rejected_candidates = validate_candidates(clahe, candidates, runtime_config)
 
     n_edge_excluded = 0
     refine_input = accepted_candidates
-    if bool(config.get("exclude_edge_touching", True)):
+    if bool(runtime_config.get("exclude_edge_touching", True)):
         n_edge_excluded = sum(c.edge_touching for c in candidates)
-    instances = refine_candidates(clahe, refine_input, config)
-    crystals = measure_instances(image_id, instances, config)
+    instances = refine_candidates(clahe, refine_input, runtime_config)
+    crystals = measure_instances(image_id, instances, runtime_config)
     summary = summarize(
         image_id=image_id,
         input_path=str(path),
@@ -156,13 +191,16 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
         n_candidates=len(candidates),
         n_edge_excluded=n_edge_excluded,
         measurements=crystals,
-        config=config,
+        config=runtime_config,
         error_list=errors,
         n_accepted_candidates=len(accepted_candidates),
         n_rejected_candidates=len(rejected_candidates),
     )
+    summary.update(square_gate)
+    summary["adhesion_strategy_used"] = bool(adhesion_strategy_used)
     summary["candidate_protect_mask_fraction"] = protect_fraction
     summary["n_prelim_candidates"] = len(prelim_candidates)
+    summary["n_square_preflight_candidates"] = len(square_preflight_candidates)
     summary["n_protect_candidates_used"] = len(protect_candidates)
 
     if output_dir is not None:
@@ -172,6 +210,7 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
             original,
             gray,
             gradient_protect_mask,
+            square_preflight_candidates,
             protect_mask,
             background,
             corrected,
@@ -182,7 +221,7 @@ def process_image(image_path: str | Path, config: dict, output_dir: str | Path |
             instances,
             crystals,
             summary,
-            config,
+            runtime_config,
             str(path),
         )
     return ImageResult(
@@ -205,6 +244,7 @@ def save_outputs(
     original,
     gray,
     gradient_protect_mask,
+    square_preflight_candidates,
     protect_mask,
     background,
     corrected,
@@ -221,11 +261,15 @@ def save_outputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     save_intermediate = bool(config.get("save_intermediate", True))
     labels = label_mask(instances, gray.shape, crystals)
+    square_instances = [inst for inst in instances if inst.refine_method == "contour_square" and not inst.skipped]
+    cluster_parent_instances = [inst for inst in instances if "cluster_unsplit" in inst.refine_method or inst.skip_reason == "cluster_unsplit"]
+    cluster_split_instances = [inst for inst in instances if inst.cluster_split]
     if save_intermediate:
         save_image(output_dir / "00_original.png", original)
         save_image(output_dir / "01_gray.png", gray)
         save_image(output_dir / "02a_gradient_protect_mask_debug.png", gradient_protect_mask)
         save_image(output_dir / "02b_candidate_protect_mask.png", protect_mask)
+        save_image(output_dir / "02c_square_preflight_overlay.png", candidate_overlay(gray, square_preflight_candidates, color_override=(255, 128, 0)))
         save_image(output_dir / "02_protect_mask.png", protect_mask)
         save_image(output_dir / "03_background_estimate.png", background_visual(background))
         save_image(output_dir / "04_flatfield_corrected.png", corrected_visual(corrected))
@@ -233,21 +277,30 @@ def save_outputs(
         save_image(output_dir / "06a_candidate_raw_overlay.png", candidate_overlay(gray, candidates))
         save_image(output_dir / "06b_candidate_accepted_overlay.png", candidate_overlay(gray, accepted_candidates, color_override=(0, 255, 0)))
         save_image(output_dir / "06c_candidate_rejected_overlay.png", candidate_overlay(gray, rejected_candidates, color_override=(0, 0, 255)))
+        save_image(output_dir / "06d_square_candidate_overlay.png", candidate_overlay(gray, [c for c in candidates if c.method == "contour_square"], color_override=(255, 128, 0)))
+        save_image(output_dir / "06e_shape_accepted_overlay.png", candidate_overlay(gray, accepted_candidates, color_override=(0, 255, 0)))
+        save_image(output_dir / "06f_shape_rejected_overlay.png", candidate_overlay(gray, rejected_candidates, color_override=(0, 0, 255)))
         save_image(output_dir / "06_candidate_localization_overlay.png", candidate_overlay(gray, accepted_candidates))
         save_image(output_dir / "07a_radial_reliable_points_overlay.png", radial_points_overlay(gray, instances, "reliable"))
         save_image(output_dir / "07b_radial_rejected_points_overlay.png", radial_points_overlay(gray, instances, "rejected"))
         save_image(output_dir / "07c_contour_refined_overlay.png", contour_points_overlay(gray, [inst for inst in instances if not inst.skipped]))
+        save_image(output_dir / "07d_square_contour_refined_overlay.png", contour_points_overlay(gray, square_instances))
+        save_image(output_dir / "07e_square_instance_masks.png", colorize_labels(label_mask(square_instances, gray.shape, crystals)))
+        save_image(output_dir / "07f_cluster_parent_overlay.png", contour_points_overlay(gray, cluster_parent_instances))
+        save_image(output_dir / "07g_cluster_split_overlay.png", contour_points_overlay(gray, cluster_split_instances))
         save_image(output_dir / "07_contour_points_overlay.png", contour_points_overlay(gray, instances))
         save_image(output_dir / "08_instance_masks.png", colorize_labels(labels))
         save_image(output_dir / "09_final_mask.png", labels > 0)
         save_image(output_dir / "10_final_overlay.png", final_overlay(gray, instances, crystals))
         save_image(output_dir / "11_label_overlay.png", label_overlay(gray, labels))
         save_area_histogram(output_dir / "12_area_histogram.png", [c for c in crystals if c.accepted])
+    write_csv(output_dir / "square_preflight_candidates.csv", [c.to_dict(image_id) for c in square_preflight_candidates], CANDIDATE_COLUMNS)
     write_csv(output_dir / "candidates_raw.csv", [c.to_dict(image_id) for c in candidates], CANDIDATE_COLUMNS)
     write_csv(output_dir / "candidates_accepted.csv", [c.to_dict(image_id) for c in accepted_candidates], CANDIDATE_COLUMNS)
     write_csv(output_dir / "candidates_rejected.csv", [c.to_dict(image_id) for c in rejected_candidates], CANDIDATE_COLUMNS)
     write_csv(output_dir / "candidates.csv", [c.to_dict(image_id) for c in accepted_candidates], CANDIDATE_COLUMNS)
     write_csv(output_dir / "crystals.csv", [c.to_dict() for c in crystals], CRYSTAL_COLUMNS)
+    write_csv(output_dir / "clusters.csv", [c.to_dict() for c in crystals if c.cluster_split or "cluster" in c.refine_method or c.shape_type == "cluster"], CRYSTAL_COLUMNS)
     write_json(output_dir / "summary.json", summary)
     write_yaml(output_dir / "config_used.yaml", config)
     write_qc_report(output_dir / "qc_report.txt", build_qc_report(image_id, input_path, candidates, instances, crystals, summary))
@@ -263,6 +316,21 @@ def run_qc(input_path: str | Path, output_root: str | Path, config: dict, overwr
         out_dir = prepare_image_output_dir(output_root, image_id, overwrite=overwrite)
         results.append(process_image(path, config, out_dir))
     return results
+
+
+def _decide_adhesion_strategy(square_gate: dict, config: dict) -> bool:
+    mode = str(config.get("adhesion_strategy_enabled", config.get("adhesion_split_enabled", "auto"))).lower()
+    if mode in {"true", "1", "yes", "on"}:
+        return True
+    if mode in {"false", "0", "no", "off"}:
+        return False
+    return (
+        bool(square_gate.get("square_strategy_used", False))
+        and (
+            int(square_gate.get("n_square_like_preflight_candidates", 0)) >= int(config.get("adhesion_gate_min_candidates", 8))
+            or float(square_gate.get("square_like_area_fraction", 0.0)) >= float(config.get("adhesion_gate_min_area_fraction", 0.01))
+        )
+    )
 
 
 def run_batch(input_path: str | Path, output_root: str | Path, config: dict, overwrite: bool = False) -> list[ImageResult]:

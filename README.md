@@ -11,8 +11,9 @@ Python tool for estimating ice-crystal actual contour area from sucrose IRI micr
 - `accepted_total_actual_area_px2` is the default summary value for downstream scientific analysis.
 - `circle_area_px2` is only a reference field and is not used for total area.
 - Without `pixel_size_um`, the tool reports area only in `px²`.
-- The default method is intended for mostly round, separated ice crystals with reasonably sharp boundaries.
-- Strongly touching, blurred, or highly non-circular crystals require manual QC or a learned segmentation route such as Cellpose.
+- The default round workflow is intended for mostly round, separated ice crystals with reasonably sharp boundaries.
+- A gated square-like strategy can add contour candidates for square, rectangular, or polygonal crystals.
+- Slight adhesion can be split by a conservative distance-transform branch; severe adhesion still requires manual QC or a learned segmentation route such as Cellpose.
 - Inspect representative `10_final_overlay.png` and `11_label_overlay.png` files for every batch.
 
 Do not treat automatic output as a final scientific conclusion. Reported areas are segmentation-derived estimates and must be checked against overlays.
@@ -46,6 +47,35 @@ python -m iri_analyzer.cli \
 
 Each image gets its own folder under the output directory. Existing non-empty per-image folders are not overwritten unless `--overwrite` is supplied.
 
+## Web UI
+
+Build the local frontend once:
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+```
+
+Start the no-code local app:
+
+```bash
+python -m iri_analyzer.web
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The Web UI supports batch image upload, preset selection, key parameter controls, processing history, full intermediate-image review, single-file download, per-image ZIP download, and whole-run ZIP download. Web runs are written under:
+
+```text
+results/web_runs/
+```
+
 ## Pipeline
 
 1. Read bmp/png/jpg/tif image and save `00_original.png`.
@@ -68,10 +98,12 @@ corrected = gray / background * median(background)
 
 8. Save `03_background_estimate.png` and `04_flatfield_corrected.png`.
 9. Apply light CLAHE after background correction and save `05_bg_corrected_clahe.png`.
-10. Detect raw candidate crystals with HoughCircles by default, or LoG if configured.
-11. Validate candidates by ring gradient strength, radial edge coverage, inside/outside contrast, local noise, radius bounds, and edge-touching rules.
-12. Refine only accepted candidates using reliable radial rays. A candidate is rejected if too few rays have a real boundary peak.
-13. Measure actual area from final instance masks and write raw plus accepted statistics.
+10. Run square preflight. If enough square-like contour candidates are not already covered by round candidates, enable the square branch.
+11. Detect raw candidate crystals with HoughCircles by default, or LoG if configured. When square strategy is enabled, add square-like contour candidates.
+12. Validate candidates with shape-aware rules: round candidates use ring/radial metrics; square-like candidates use boundary strength, closure, solidity, extent, rectangularity, corner count, and local noise rejection.
+13. Refine accepted candidates. Round candidates use reliable radial rays; square-like candidates use contour-mask refinement instead of radial fitting.
+14. Optionally split high-confidence, slightly adhered parent masks with distance-transform seeds.
+15. Measure actual area from final instance masks and write raw plus accepted statistics.
 
 CLAHE is not recommended before background estimation because it can amplify shadows, noise, and ice-crystal edges, causing pseudo-structure to leak into the background model.
 
@@ -84,6 +116,7 @@ Per image folder:
 01_gray.png
 02a_gradient_protect_mask_debug.png
 02b_candidate_protect_mask.png
+02c_square_preflight_overlay.png
 02_protect_mask.png
 03_background_estimate.png
 04_flatfield_corrected.png
@@ -91,10 +124,17 @@ Per image folder:
 06a_candidate_raw_overlay.png
 06b_candidate_accepted_overlay.png
 06c_candidate_rejected_overlay.png
+06d_square_candidate_overlay.png
+06e_shape_accepted_overlay.png
+06f_shape_rejected_overlay.png
 06_candidate_localization_overlay.png
 07a_radial_reliable_points_overlay.png
 07b_radial_rejected_points_overlay.png
 07c_contour_refined_overlay.png
+07d_square_contour_refined_overlay.png
+07e_square_instance_masks.png
+07f_cluster_parent_overlay.png
+07g_cluster_split_overlay.png
 07_contour_points_overlay.png
 08_instance_masks.png
 09_final_mask.png
@@ -105,7 +145,9 @@ candidates_raw.csv
 candidates_accepted.csv
 candidates_rejected.csv
 candidates.csv
+square_preflight_candidates.csv
 crystals.csv
+clusters.csv
 summary.json
 config_used.yaml
 qc_report.txt
@@ -139,6 +181,13 @@ median_actual_area_px2,n_qc_warning
 - `candidate_validation_enabled`: validate raw Hough/LoG candidates before contour refinement.
 - `min_edge_coverage_fraction`: minimum fraction of radial directions with a boundary peak.
 - `ring_gradient_noise_ratio_min`: minimum ring gradient strength relative to local noise.
+- `square_strategy_enabled`: `auto`, `true`, or `false`. `auto` enables square-like contour candidates only when preflight finds enough unmatched square-like objects.
+- `square_gate_min_candidates`, `square_gate_min_candidate_fraction`, `square_gate_min_area_fraction`: image-level gate thresholds for square strategy.
+- `square_gate_round_match_center_fraction`, `square_gate_round_match_iou`: suppress square preflight objects already covered by round candidates.
+- `square_candidate_*`: contour-shape filters for square-like candidate detection.
+- `square_refine_*`: local contour-mask refinement settings for square-like candidates.
+- `adhesion_strategy_enabled`, `adhesion_split_enabled`: `auto`, `true`, or `false` controls for slight-adhesion splitting.
+- `adhesion_*`: distance-transform seed and child-mask acceptance thresholds for cluster splitting.
 - `contour_n_angles`: number of radial search directions.
 - `radial_search_min_scale`, `radial_search_max_scale`, `radial_search_extra_px`: radial boundary search window.
 - `radial_peak_nearmax_fraction`: accepts a near-maximum gradient peak, lightly preferring the approximate candidate radius.
@@ -159,6 +208,9 @@ Review these files before trusting quantitative output:
 - `10_final_overlay.png`: final contours should follow crystal boundaries.
 - `11_label_overlay.png`: labels should match `crystals.csv`.
 - `06c_candidate_rejected_overlay.png`: rejected candidates should mostly be weak-edge, noisy, edge-touching, or suspicious objects.
+- `02c_square_preflight_overlay.png`: confirms whether square-like candidates are present before enabling square strategy.
+- `07d_square_contour_refined_overlay.png`: square/rectangular contours should follow actual crystal edges.
+- `07g_cluster_split_overlay.png`: split children should correspond to real lightly adhered crystals, not texture fragments.
 - `qc_report.txt`: lists suspicious objects and skipped candidates.
 
 Automatic QC flags include abnormal `area_over_circle`, large radial radius range, large overlap trimming, edge touching, too-small area, too-large area, and failed/low-quality radial contours.
