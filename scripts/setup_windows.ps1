@@ -2,12 +2,23 @@ $ErrorActionPreference = "Stop"
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RootDir
+$LogPath = Join-Path $RootDir "setup_windows.log"
+$TranscriptStarted = $false
+try {
+    Start-Transcript -Path $LogPath -Force | Out-Null
+    $TranscriptStarted = $true
+} catch {
+    Write-Host "Could not start setup log: $($_.Exception.Message)"
+}
 
 Write-Host ""
 Write-Host "============================================================"
 Write-Host " IRI Analyzer - Windows environment setup"
 Write-Host "============================================================"
+Write-Host "Log file: $LogPath"
 Write-Host ""
+
+try {
 
 function Refresh-Path {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -247,3 +258,20 @@ Write-Host "============================================================"
 Write-Host " Setup complete."
 Write-Host " You can now double-click 02_start_web_ui.cmd"
 Write-Host "============================================================"
+exit 0
+} catch {
+    Write-Host ""
+    Write-Host "============================================================"
+    Write-Host " Setup failed."
+    Write-Host " Error: $($_.Exception.Message)"
+    Write-Host " Log file: $LogPath"
+    Write-Host "============================================================"
+    exit 1
+} finally {
+    if ($TranscriptStarted) {
+        try {
+            Stop-Transcript | Out-Null
+        } catch {
+        }
+    }
+}

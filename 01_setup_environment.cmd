@@ -1,6 +1,12 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
+
+if /I not "%~1"=="__inner" (
+  start "IRI Analyzer Setup" "%ComSpec%" /k ""%~f0" __inner"
+  exit /b
+)
+
 cd /d "%~dp0" || (
   echo Failed to enter project directory: %~dp0
   pause
@@ -20,5 +26,6 @@ echo.
 if not "%SETUP_EXIT%"=="0" (
   echo Setup failed. Please review the messages above.
 )
-pause
+echo.
+echo This setup window will stay open. You can close it manually after reading the output.
 exit /b %SETUP_EXIT%
