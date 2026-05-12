@@ -195,6 +195,12 @@ gray -> candidate protect mask -> background estimate from raw gray -> flat-fiel
 
 脚本会优先尝试用 `winget` 自动安装。如果无法自动安装，会打开官方下载页面。安装完成后，再次双击 `01_setup_environment.cmd`。
 
+### 手动打开 cmd/PowerShell 能识别 winget，但双击脚本不行
+
+这是 Windows 的常见环境差异：双击脚本由 Explorer 启动，Explorer 可能持有旧的 `PATH`，而 `winget` 又通常是 `App Execution Alias`，实际入口在当前用户的 `Microsoft\WindowsApps` 目录。当前脚本会在启动时重建 `PATH`，并依次检查 `PATH`、`WindowsApps` 和 `Microsoft.DesktopAppInstaller` 包目录。
+
+如果仍然失败，请把根目录下的 `setup_launcher.log` 和 `setup_windows.log` 发给维护者。不要用管理员身份运行安装脚本，`winget` 的用户级 alias 在管理员环境中更容易不可见。
+
 ### 双击启动后网页打不开
 
 确认：

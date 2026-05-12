@@ -1,4 +1,21 @@
+param(
+    [switch]$PauseOnExit
+)
+
 $ErrorActionPreference = "Stop"
+
+function Test-LaunchedFromExplorer {
+    try {
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
+        if (-not $current.ParentProcessId) { return $false }
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($current.ParentProcessId)" -ErrorAction Stop
+        return $parent.Name -ieq "explorer.exe"
+    } catch {
+        return $false
+    }
+}
+
+$PauseBeforeExit = $PauseOnExit -or (Test-LaunchedFromExplorer)
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RootDir
@@ -20,11 +37,62 @@ Write-Host ""
 
 try {
 
+function Split-PathEntries {
+    param([AllowNull()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
+
+    return @($Value -split ";" | ForEach-Object {
+        $entry = $_.Trim().Trim('"')
+        if ($entry) {
+            [Environment]::ExpandEnvironmentVariables($entry)
+        }
+    } | Where-Object { $_ })
+}
+
+function Add-PathEntry {
+    param(
+        [System.Collections.Generic.List[string]]$Entries,
+        [hashtable]$Seen,
+        [AllowNull()][string]$Entry
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Entry)) { return }
+    $expanded = [Environment]::ExpandEnvironmentVariables($Entry.Trim().Trim('"'))
+    if ([string]::IsNullOrWhiteSpace($expanded)) { return }
+    $key = $expanded.TrimEnd("\").ToLowerInvariant()
+    if (-not $Seen.ContainsKey($key)) {
+        $Seen[$key] = $true
+        $Entries.Add($expanded) | Out-Null
+    }
+}
+
 function Refresh-Path {
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $windowsApps = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
-    $env:Path = (@($windowsApps, $machinePath, $userPath) | Where-Object { $_ }) -join ";"
+    $entries = [System.Collections.Generic.List[string]]::new()
+    $seen = @{}
+
+    $knownFirst = @(
+        (Join-Path $env:SystemRoot "System32"),
+        $env:SystemRoot,
+        (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0"),
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"),
+        (Join-Path $env:USERPROFILE "AppData\Local\Microsoft\WindowsApps")
+    )
+
+    foreach ($entry in $knownFirst) {
+        Add-PathEntry -Entries $entries -Seen $seen -Entry $entry
+    }
+
+    foreach ($entry in (Split-PathEntries ([Environment]::GetEnvironmentVariable("Path", "Machine")))) {
+        Add-PathEntry -Entries $entries -Seen $seen -Entry $entry
+    }
+    foreach ($entry in (Split-PathEntries ([Environment]::GetEnvironmentVariable("Path", "User")))) {
+        Add-PathEntry -Entries $entries -Seen $seen -Entry $entry
+    }
+    foreach ($entry in (Split-PathEntries $env:Path)) {
+        Add-PathEntry -Entries $entries -Seen $seen -Entry $entry
+    }
+
+    $env:Path = $entries -join ";"
 }
 
 function Test-PythonCommand {
@@ -117,31 +185,106 @@ function Find-Npm {
     return $null
 }
 
-function Find-Winget {
-    Refresh-Path
+function Test-WingetCommand {
+    param([Parameter(Mandatory = $true)][string]$Command)
 
-    $command = Get-Command winget.exe -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
-
-    $command = Get-Command winget -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
-
-    $windowsAppsWinget = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\winget.exe"
-    if (Test-Path $windowsAppsWinget) {
-        return $windowsAppsWinget
+    try {
+        & $Command --version *> $null
+        if ($LASTEXITCODE -eq 0) { return $true }
+    } catch {
     }
 
     try {
-        $package = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
-            Sort-Object Version -Descending |
-            Select-Object -First 1
-        if ($package -and $package.InstallLocation) {
-            $packageWinget = Join-Path $package.InstallLocation "winget.exe"
-            if (Test-Path $packageWinget) {
-                return $packageWinget
+        & $Command --help *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Add-WingetCandidate {
+    param(
+        [System.Collections.Generic.List[string]]$Candidates,
+        [hashtable]$Seen,
+        [AllowNull()][string]$Candidate
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return }
+    $key = $Candidate.ToLowerInvariant()
+    if (-not $Seen.ContainsKey($key)) {
+        $Seen[$key] = $true
+        $Candidates.Add($Candidate) | Out-Null
+    }
+}
+
+function Find-Winget {
+    Refresh-Path
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $seen = @{}
+
+    foreach ($name in @("winget.exe", "winget")) {
+        $commands = @(Get-Command $name -All -ErrorAction SilentlyContinue)
+        foreach ($command in $commands) {
+            if ($command.Source) {
+                Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate $command.Source
+            } elseif ($command.Path) {
+                Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate $command.Path
+            } else {
+                Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate $name
+            }
+        }
+    }
+
+    $explicitAliases = @(
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\winget.exe"),
+        (Join-Path $env:USERPROFILE "AppData\Local\Microsoft\WindowsApps\winget.exe")
+    )
+    foreach ($path in $explicitAliases) {
+        if ($path -and (Test-Path $path)) {
+            Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate $path
+        }
+    }
+
+    try {
+        $packages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+            Sort-Object Version -Descending)
+        foreach ($package in $packages) {
+            if ($package.InstallLocation) {
+                $packageWinget = Join-Path $package.InstallLocation "winget.exe"
+                if (Test-Path $packageWinget) {
+                    Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate $packageWinget
+                }
             }
         }
     } catch {
+    }
+
+    try {
+        $windowsAppsRoot = Join-Path $env:ProgramFiles "WindowsApps"
+        if (Test-Path $windowsAppsRoot) {
+            $packageDirs = @(Get-ChildItem -Path $windowsAppsRoot -Directory -Filter "Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending)
+            foreach ($dir in $packageDirs) {
+                $packageWinget = Join-Path $dir.FullName "winget.exe"
+                if (Test-Path $packageWinget) {
+                    Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate $packageWinget
+                }
+            }
+        }
+    } catch {
+    }
+
+    Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate "winget.exe"
+    Add-WingetCandidate -Candidates $candidates -Seen $seen -Candidate "winget"
+
+    Write-Host "Checking winget candidates..."
+    foreach ($candidate in $candidates) {
+        if (Test-WingetCommand -Command $candidate) {
+            Write-Host "winget command: $candidate"
+            return $candidate
+        }
+        Write-Host "winget candidate did not work: $candidate"
     }
 
     return $null
@@ -156,8 +299,8 @@ function Install-WithWinget {
     $winget = Find-Winget
     if (-not $winget) {
         Write-Host "winget was not found; cannot install $Name automatically."
-        Write-Host "Checked PATH, WindowsApps, and Microsoft.DesktopAppInstaller."
-        return
+        Write-Host "Checked refreshed PATH, WindowsApps aliases, and Microsoft.DesktopAppInstaller."
+        return $false
     }
 
     Write-Host ""
@@ -165,8 +308,10 @@ function Install-WithWinget {
     & $winget install -e --id $PackageId --accept-package-agreements --accept-source-agreements
     if ($LASTEXITCODE -ne 0) {
         Write-Host "winget install for $Name did not complete successfully."
+        return $false
     }
     Refresh-Path
+    return $true
 }
 
 function Invoke-Checked {
@@ -305,5 +450,9 @@ exit 0
             Stop-Transcript | Out-Null
         } catch {
         }
+    }
+    if ($PauseBeforeExit) {
+        Write-Host ""
+        $null = Read-Host "Press Enter to close this window"
     }
 }

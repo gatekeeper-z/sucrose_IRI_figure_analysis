@@ -13,6 +13,7 @@ echo IRI Analyzer setup launcher > "%LAUNCH_LOG%"
 echo Started: %DATE% %TIME% >> "%LAUNCH_LOG%"
 echo Root: %ROOT_DIR% >> "%LAUNCH_LOG%"
 echo PowerShell: %PS_EXE% >> "%LAUNCH_LOG%"
+echo Initial PATH: %PATH% >> "%LAUNCH_LOG%"
 
 echo.
 echo ============================================================
@@ -39,9 +40,16 @@ if not exist "%SETUP_SCRIPT%" (
   goto finish_fail
 )
 
-if exist "%LOCALAPPDATA%\Microsoft\WindowsApps" (
-  set "PATH=%LOCALAPPDATA%\Microsoft\WindowsApps;%PATH%"
-)
+set "BOOTSTRAP_PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\WindowsPowerShell\v1.0"
+if defined LOCALAPPDATA set "BOOTSTRAP_PATH=%LOCALAPPDATA%\Microsoft\WindowsApps;%BOOTSTRAP_PATH%"
+if defined USERPROFILE set "BOOTSTRAP_PATH=%USERPROFILE%\AppData\Local\Microsoft\WindowsApps;%BOOTSTRAP_PATH%"
+set "PATH=%BOOTSTRAP_PATH%;%PATH%"
+echo Bootstrap PATH prefix: %BOOTSTRAP_PATH% >> "%LAUNCH_LOG%"
+echo PATH after bootstrap: %PATH% >> "%LAUNCH_LOG%"
+echo where winget result: >> "%LAUNCH_LOG%"
+where winget >> "%LAUNCH_LOG%" 2>&1
+echo winget --version result: >> "%LAUNCH_LOG%"
+winget --version >> "%LAUNCH_LOG%" 2>&1
 
 echo Running Windows setup script...
 echo Running setup script: %SETUP_SCRIPT% >> "%LAUNCH_LOG%"
