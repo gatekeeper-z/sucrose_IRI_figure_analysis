@@ -13,7 +13,7 @@ if exist ".venv\Scripts\python.exe" (
   set "PY_EXE=%CD%\.venv\Scripts\python.exe"
 ) else (
   where python >nul 2>nul
-  if %ERRORLEVEL% EQU 0 (
+  if not errorlevel 1 (
     set "PY_EXE=python"
   ) else (
     echo Python environment was not found.
@@ -24,7 +24,7 @@ if exist ".venv\Scripts\python.exe" (
 )
 
 "%PY_EXE%" -c "import iri_analyzer, fastapi, uvicorn" >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
+if errorlevel 1 (
   echo Required Python packages are missing.
   echo Please run 01_setup_environment.cmd first.
   pause
