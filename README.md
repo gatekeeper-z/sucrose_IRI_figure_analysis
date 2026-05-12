@@ -36,6 +36,14 @@ IRI Analyzer 是一个本地运行的蔗糖法 IRI 显微图像冰晶面积分�
 
 安装成功后，窗口会显示 `Setup complete`。
 
+Linux 用户可在终端中运行：
+
+```bash
+sh 01_setup_environment.sh
+```
+
+该脚本会尝试通过系统包管理器安装 Python 3.10+、Node.js 18+、npm 和必要依赖，然后构建前端并运行测试。
+
 ### 第二步：双击启动网页
 
 双击：
