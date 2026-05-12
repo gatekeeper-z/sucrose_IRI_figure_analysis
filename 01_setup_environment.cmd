@@ -1,35 +1,72 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
+title IRI Analyzer Setup
+
+set "ROOT_DIR=%~dp0"
+set "SETUP_SCRIPT=%ROOT_DIR%scripts\setup_windows.ps1"
+set "LAUNCH_LOG=%ROOT_DIR%setup_launcher.log"
+set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS_EXE%" set "PS_EXE=powershell.exe"
+
+echo IRI Analyzer setup launcher > "%LAUNCH_LOG%"
+echo Started: %DATE% %TIME% >> "%LAUNCH_LOG%"
+echo Root: %ROOT_DIR% >> "%LAUNCH_LOG%"
+echo PowerShell: %PS_EXE% >> "%LAUNCH_LOG%"
+
+echo.
+echo ============================================================
+echo  IRI Analyzer - environment setup launcher
+echo ============================================================
+echo Project directory:
+echo %ROOT_DIR%
+echo.
+echo Launcher log:
+echo %LAUNCH_LOG%
+echo.
+
+cd /d "%ROOT_DIR%"
+if errorlevel 1 (
+  echo Failed to enter project directory: %ROOT_DIR%
+  echo Failed to enter project directory. >> "%LAUNCH_LOG%"
+  goto finish_fail
+)
+
+if not exist "%SETUP_SCRIPT%" (
+  echo Missing setup script:
+  echo %SETUP_SCRIPT%
+  echo Missing setup script: %SETUP_SCRIPT% >> "%LAUNCH_LOG%"
+  goto finish_fail
+)
 
 if exist "%LOCALAPPDATA%\Microsoft\WindowsApps" (
   set "PATH=%LOCALAPPDATA%\Microsoft\WindowsApps;%PATH%"
 )
 
-if /I not "%~1"=="__inner" (
-  start "IRI Analyzer Setup" "%ComSpec%" /k ""%~f0" __inner"
-  exit /b
-)
-
-cd /d "%~dp0" || (
-  echo Failed to enter project directory: %~dp0
-  pause
-  exit /b 1
-)
-
-if not exist "%~dp0scripts\setup_windows.ps1" (
-  echo Missing setup script: %~dp0scripts\setup_windows.ps1
-  pause
-  exit /b 1
-)
-
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup_windows.ps1"
+echo Running Windows setup script...
+echo Running setup script: %SETUP_SCRIPT% >> "%LAUNCH_LOG%"
+echo.
+"%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SETUP_SCRIPT%"
 set "SETUP_EXIT=%ERRORLEVEL%"
+echo Setup script exit code: %SETUP_EXIT% >> "%LAUNCH_LOG%"
 
 echo.
-if not "%SETUP_EXIT%"=="0" (
+if "%SETUP_EXIT%"=="0" (
+  echo Setup complete. You can now double-click 02_start_web_ui.cmd
+) else (
   echo Setup failed. Please review the messages above.
+  echo.
+  echo If the error is not clear, send these files for diagnosis:
+  echo %LAUNCH_LOG%
+  echo %ROOT_DIR%setup_windows.log
 )
+goto finish
+
+:finish_fail
+set "SETUP_EXIT=1"
+
+:finish
 echo.
-echo This setup window will stay open. You can close it manually after reading the output.
+echo This window will stay open. You can close it manually after reading the output.
+pause
 exit /b %SETUP_EXIT%

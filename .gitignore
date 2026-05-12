@@ -30,6 +30,7 @@ iri-web-*.png
 
 # Logs and temporary files
 *.log
+setup_launcher.log
 setup_windows.log
 *.tmp
 *.temp
