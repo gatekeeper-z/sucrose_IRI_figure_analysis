@@ -23,7 +23,8 @@ try {
 function Refresh-Path {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ";"
+    $windowsApps = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
+    $env:Path = (@($windowsApps, $machinePath, $userPath) | Where-Object { $_ }) -join ";"
 }
 
 function Test-PythonCommand {
@@ -116,21 +117,52 @@ function Find-Npm {
     return $null
 }
 
+function Find-Winget {
+    Refresh-Path
+
+    $command = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    $command = Get-Command winget -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    $windowsAppsWinget = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\winget.exe"
+    if (Test-Path $windowsAppsWinget) {
+        return $windowsAppsWinget
+    }
+
+    try {
+        $package = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+        if ($package -and $package.InstallLocation) {
+            $packageWinget = Join-Path $package.InstallLocation "winget.exe"
+            if (Test-Path $packageWinget) {
+                return $packageWinget
+            }
+        }
+    } catch {
+    }
+
+    return $null
+}
+
 function Install-WithWinget {
     param(
         [Parameter(Mandatory = $true)][string]$PackageId,
         [Parameter(Mandatory = $true)][string]$Name
     )
 
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    $winget = Find-Winget
     if (-not $winget) {
         Write-Host "winget was not found; cannot install $Name automatically."
+        Write-Host "Checked PATH, WindowsApps, and Microsoft.DesktopAppInstaller."
         return
     }
 
     Write-Host ""
-    Write-Host "Trying to install $Name automatically with winget..."
-    & $winget.Source install -e --id $PackageId --accept-package-agreements --accept-source-agreements
+    Write-Host "Trying to install $Name automatically with winget: $winget"
+    & $winget install -e --id $PackageId --accept-package-agreements --accept-source-agreements
     if ($LASTEXITCODE -ne 0) {
         Write-Host "winget install for $Name did not complete successfully."
     }

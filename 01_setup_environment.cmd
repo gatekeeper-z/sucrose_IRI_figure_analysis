@@ -2,6 +2,10 @@
 setlocal EnableExtensions
 chcp 65001 >nul
 
+if exist "%LOCALAPPDATA%\Microsoft\WindowsApps" (
+  set "PATH=%LOCALAPPDATA%\Microsoft\WindowsApps;%PATH%"
+)
+
 if /I not "%~1"=="__inner" (
   start "IRI Analyzer Setup" "%ComSpec%" /k ""%~f0" __inner"
   exit /b
